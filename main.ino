@@ -22,8 +22,9 @@ PubSubClient client(espClient);
 #define BUZZER 26
 #define LED_BATTERY 14
 #define VOLTAGE_PIN 34
+#define MODE_SWITCH 27
 
-// TFT Display pins (defined in User_Setup.h or here)
+// TFT Display pins
 TFT_eSPI tft = TFT_eSPI();
 
 // ADS1115 setup
@@ -33,25 +34,24 @@ Adafruit_ADS1115 ads;
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-// Voltage divider constants (68K and 33K)
+// Voltage divider constants
 const float R1 = 14700.0;
 const float R2 = 10000.0;
 const float VREF = 3.3;
 const float LOW_BATTERY_THRESHOLD = 6.50;
 
-// ===== BATTERY PERCENTAGE CONSTANTS =====
+// BATTERY PERCENTAGE CONSTANTS
 const float BATTERY_MAX_VOLTAGE = 8.4;  // 100% battery
 const float BATTERY_MIN_VOLTAGE = 6.0;  // 0% battery
 
-// ===== CALIBRATION CONSTANTS FOR pH (ADS1115 16-bit) =====
+//  CALIBRATION CONSTANTS FOR pH (ADS1115 16-bit) 
 const float pH_slope = -0.0860;           // V per pH (from calibration)
 const float pH_intercept = 4.33986;       // Intercept from calibration
 const float pH_offset = 0.70;             // Final offset correction
 const float ADS_VREF = 4.096;             // ADS1115 reference voltage (GAIN_ONE)
 
-// ***** UBAH NILAI INI UNTUK KALIBRASI pH 7 *****
+//  KALIBRASI pH 7 
 const float pH7_voltage = 3.3;            // Tegangan saat pH 7 (dalam Volt)
-// ************************************************
 
 // Global variables
 float temperature = 0.0;
@@ -59,9 +59,13 @@ float pH_value = 0.0;
 float turbidity = 0.0;
 float tds_value = 0.0;
 float battery_voltage = 0.0;
-int battery_percentage = 0;  // ===== VARIABLE BARU UNTUK PERSENTASE BATERAI =====
+int battery_percentage = 0;
 bool iot_enabled = true;
 bool is_suitable = false;
+
+//  MODE VARIABLES 
+bool mode_B = false;  // false = Mode A (evaluasi), true = Mode B (unlimited)
+bool previous_mode = false;
 
 // Stability check variables
 float prev_temp = 0, prev_pH = 0, prev_turb = 0, prev_tds = 0;
@@ -82,7 +86,7 @@ enum SystemState {
 };
 SystemState current_state = STATE_READING;
 
-// ===== RPC CALLBACK FUNCTION =====
+//  RPC CALLBACK FUNCTION 
 void onRpcMessage(char* topic, byte* payload, unsigned int length) {
   Serial.print("RPC received on topic: ");
   Serial.println(topic);
@@ -102,7 +106,7 @@ void onRpcMessage(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-// ===== RESET FUNCTION =====
+//  RESET FUNCTION 
 void performReset() {
   Serial.println("Performing system reset...");
   
@@ -123,7 +127,7 @@ void performReset() {
   Serial.println("Reset complete, returning to reading state");
 }
 
-// ===== FUNGSI UNTUK MENGHITUNG PERSENTASE BATERAI =====
+//  FUNGSI UNTUK MENGHITUNG PERSENTASE BATERAI 
 int calculateBatteryPercentage(float voltage) {
   // Konversi tegangan ke persentase (0-100%)
   // 8.4V = 100%, 6.0V = 0%
@@ -136,6 +140,30 @@ int calculateBatteryPercentage(float voltage) {
   return (int)percentage;
 }
 
+//  FUNGSI UNTUK MEMBACA MODE SWITCH 
+void readModeSwitch() {
+  mode_B = digitalRead(MODE_SWITCH); // HIGH = Mode B, LOW = Mode A
+  
+  // Deteksi perubahan mode
+  if (mode_B != previous_mode) {
+    previous_mode = mode_B;
+    
+    // Reset saat mode berubah
+    if (!mode_B) {
+      // Kembali ke Mode A
+      Serial.println("Switched to Mode A (Evaluation Mode)");
+      performReset();
+    } else {
+      // Pindah ke Mode B
+      Serial.println("Switched to Mode B (Unlimited Reading Mode)");
+      is_stable = false;
+      stability_start = 0;
+      current_state = STATE_READING;
+      tft.fillScreen(TFT_BLACK);
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("=== Drinking Water Suitability Detection System ===");
@@ -144,6 +172,7 @@ void setup() {
   pinMode(RESET_BUTTON, INPUT_PULLUP);
   pinMode(BUZZER, OUTPUT);
   pinMode(LED_BATTERY, OUTPUT);
+  pinMode(MODE_SWITCH, INPUT_PULLUP);  //  MODE SWITCH PIN 
   digitalWrite(BUZZER, LOW);
   digitalWrite(LED_BATTERY, LOW);
   
@@ -165,10 +194,19 @@ void setup() {
   // Connect to WiFi (3 attempts)
   connectWiFi();
   
+  // Read initial mode
+  mode_B = digitalRead(MODE_SWITCH);
+  previous_mode = mode_B;
+  Serial.print("Initial Mode: ");
+  Serial.println(mode_B ? "B (Unlimited)" : "A (Evaluation)");
+  
   // Main loop will handle the rest
 }
 
 void loop() {
+  // Read mode switch
+  readModeSwitch();
+  
   // Maintain MQTT connection
   if (iot_enabled) {
     if (!client.connected()) {
@@ -192,7 +230,14 @@ void loop() {
     }
   }
   
-  // State machine handling
+  //  MODE B: UNLIMITED READING (NO EVALUATION) 
+  if (mode_B) {
+    displaySensorReadingsUnlimited();
+    delay(100);
+    return;  // Skip state machine
+  }
+  
+  //  MODE A: EVALUATION MODE (STATE MACHINE) 
   switch (current_state) {
     case STATE_READING:
       // Display sensor readings
@@ -308,7 +353,7 @@ void connectWiFi() {
     // Setup MQTT
     client.setServer(mqtt_server, 1883);
     
-    // ===== SET RPC CALLBACK =====
+    //  SET RPC CALLBACK 
     client.setCallback(onRpcMessage);
     
     reconnectMQTT();
@@ -327,7 +372,7 @@ void reconnectMQTT() {
   if (client.connect("ESP32Client", token, NULL)) {
     Serial.println("Connected to ThingsBoard");
     
-    // ===== SUBSCRIBE TO RPC TOPIC =====
+    //  SUBSCRIBE TO RPC TOPIC 
     client.subscribe("v1/devices/me/rpc/request/+");
     Serial.println("Subscribed to RPC topic");
   } else {
@@ -340,7 +385,7 @@ void checkBattery() {
   float adc_voltage = (raw_adc / 4095.0) * VREF;
   battery_voltage = adc_voltage * ((R1 + R2) / R2);
   
-  // ===== HITUNG PERSENTASE BATERAI =====
+  //  HITUNG PERSENTASE BATERAI 
   battery_percentage = calculateBatteryPercentage(battery_voltage);
   
   // Debug output
@@ -365,7 +410,7 @@ void readSensors() {
   Serial.print(temperature);
   Serial.println(" C");
   
-  // ===== READ pH FROM ADS1115 A0 (16-bit) =====
+  //  READ pH FROM ADS1115 A0 (16-bit) 
   int16_t adc0 = ads.readADC_SingleEnded(0);  // Raw 16-bit value (0-32767)
   
   // Convert ADC value to voltage using ADS1115 reference
@@ -417,21 +462,63 @@ void readSensors() {
   Serial.println(" ppm");
 }
 
+//  DISPLAY UNTUK MODE A (DENGAN STABILIZING) 
 void displaySensorReadings() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
   tft.setTextDatum(TL_DATUM);
   
-  tft.drawString("Temp: " + String(temperature, 1) + " C", 10, 20);
-  tft.drawString("pH: " + String(pH_value, 2), 10, 60);
-  tft.drawString("Turb: " + String(turbidity, 1) + " NTU", 10, 100);
-  tft.drawString("TDS: " + String(tds_value, 0) + " ppm", 10, 140);
+  // Mode indicator
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("MODE: A (Eval)", 10, 5);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  
+  tft.drawString("Temp: " + String(temperature, 1) + " C", 10, 30);
+  tft.drawString("pH: " + String(pH_value, 2), 10, 70);
+  tft.drawString("Turb: " + String(turbidity, 1) + " NTU", 10, 110);
+  tft.drawString("TDS: " + String(tds_value, 0) + " ppm", 10, 150);
   
   if (!is_stable) {
     tft.setTextSize(1);
     tft.setTextDatum(MC_DATUM);
     tft.drawString("Stabilizing...", 120, 200);
   }
+  
+  // Display low battery warning if needed
+  if (battery_voltage < LOW_BATTERY_THRESHOLD) {
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("Low Battery", 120, 230);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  }
+}
+
+//  DISPLAY UNTUK MODE B (UNLIMITED, TANPA STABILIZING) 
+void displaySensorReadingsUnlimited() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextDatum(TL_DATUM);
+  
+  // Mode indicator dengan warna berbeda
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("MODE: B (Unlimited)", 10, 5);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  
+  tft.drawString("Temp: " + String(temperature, 1) + " C", 10, 30);
+  tft.drawString("pH: " + String(pH_value, 2), 10, 70);
+  tft.drawString("Turb: " + String(turbidity, 1) + " NTU", 10, 110);
+  tft.drawString("TDS: " + String(tds_value, 0) + " ppm", 10, 150);
+  
+  // Display status unlimited
+  tft.setTextSize(1);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("Continuous Reading", 120, 200);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
   
   // Display low battery warning if needed
   if (battery_voltage < LOW_BATTERY_THRESHOLD) {
@@ -556,8 +643,9 @@ void uploadToThingsBoard() {
     payload += "\"turbidity\":" + String(turbidity, 2) + ",";
     payload += "\"tds\":" + String(tds_value, 2) + ",";
     payload += "\"battery\":" + String(battery_voltage, 2) + ",";
-    // ===== TAMBAHKAN PERSENTASE BATERAI KE PAYLOAD =====
     payload += "\"battery_percentage\":" + String(battery_percentage) + ",";
+    //  TAMBAHKAN MODE KE PAYLOAD 
+    payload += "\"mode\":\"" + String(mode_B ? "B" : "A") + "\",";
     payload += "\"suitable\":";
     payload += is_suitable ? "true" : "false";
     payload += "}";
