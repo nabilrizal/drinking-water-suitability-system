@@ -77,6 +77,47 @@ enum SystemState {
 };
 SystemState current_state = STATE_READING;
 
+// ===== RPC CALLBACK FUNCTION =====
+void onRpcMessage(char* topic, byte* payload, unsigned int length) {
+  Serial.print("RPC received on topic: ");
+  Serial.println(topic);
+  
+  // Parse payload
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.print("Message: ");
+  Serial.println(message);
+  
+  // Check if it's a reset command
+  if (message.indexOf("\"method\":\"reset\"") > -1) {
+    Serial.println("Reset command received via RPC!");
+    performReset();
+  }
+}
+
+// ===== RESET FUNCTION =====
+void performReset() {
+  Serial.println("Performing system reset...");
+  
+  // Reset state variables
+  is_stable = false;
+  stability_start = 0;
+  current_state = STATE_READING;
+  
+  // Clear display
+  tft.fillScreen(TFT_BLACK);
+  
+  // Optional: Send response back to ThingsBoard
+  if (client.connected()) {
+    String response = "{\"reset\":\"success\"}";
+    client.publish("v1/devices/me/rpc/response/1", response.c_str());
+  }
+  
+  Serial.println("Reset complete, returning to reading state");
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("=== Drinking Water Suitability Detection System ===");
@@ -166,14 +207,12 @@ void loop() {
       break;
       
     case STATE_RESULT_DISPLAY:
-      // Wait for reset button
+      // Wait for reset button (physical button)
       if (digitalRead(RESET_BUTTON) == LOW) {
         // Reset pressed
         Serial.println("Reset button pressed, restarting...");
         delay(300); // Debounce
-        is_stable = false;
-        current_state = STATE_READING;
-        tft.fillScreen(TFT_BLACK);
+        performReset();
       }
       break;
   }
@@ -250,6 +289,10 @@ void connectWiFi() {
     
     // Setup MQTT
     client.setServer(mqtt_server, 1883);
+    
+    // ===== SET RPC CALLBACK =====
+    client.setCallback(onRpcMessage);
+    
     reconnectMQTT();
     
     iot_enabled = true;
@@ -265,6 +308,10 @@ void connectWiFi() {
 void reconnectMQTT() {
   if (client.connect("ESP32Client", token, NULL)) {
     Serial.println("Connected to ThingsBoard");
+    
+    // ===== SUBSCRIBE TO RPC TOPIC =====
+    client.subscribe("v1/devices/me/rpc/request/+");
+    Serial.println("Subscribed to RPC topic");
   } else {
     Serial.println("Failed to connect to ThingsBoard");
   }
