@@ -39,6 +39,10 @@ const float R2 = 10000.0;
 const float VREF = 3.3;
 const float LOW_BATTERY_THRESHOLD = 6.50;
 
+// ===== BATTERY PERCENTAGE CONSTANTS =====
+const float BATTERY_MAX_VOLTAGE = 8.4;  // 100% battery
+const float BATTERY_MIN_VOLTAGE = 6.0;  // 0% battery
+
 // ===== CALIBRATION CONSTANTS FOR pH (ADS1115 16-bit) =====
 const float pH_slope = -0.0860;           // V per pH (from calibration)
 const float pH_intercept = 4.33986;       // Intercept from calibration
@@ -55,6 +59,7 @@ float pH_value = 0.0;
 float turbidity = 0.0;
 float tds_value = 0.0;
 float battery_voltage = 0.0;
+int battery_percentage = 0;  // ===== VARIABLE BARU UNTUK PERSENTASE BATERAI =====
 bool iot_enabled = true;
 bool is_suitable = false;
 
@@ -116,6 +121,19 @@ void performReset() {
   }
   
   Serial.println("Reset complete, returning to reading state");
+}
+
+// ===== FUNGSI UNTUK MENGHITUNG PERSENTASE BATERAI =====
+int calculateBatteryPercentage(float voltage) {
+  // Konversi tegangan ke persentase (0-100%)
+  // 8.4V = 100%, 6.0V = 0%
+  float percentage = ((voltage - BATTERY_MIN_VOLTAGE) / (BATTERY_MAX_VOLTAGE - BATTERY_MIN_VOLTAGE)) * 100.0;
+  
+  // Batasi nilai antara 0-100
+  if (percentage > 100.0) percentage = 100.0;
+  if (percentage < 0.0) percentage = 0.0;
+  
+  return (int)percentage;
 }
 
 void setup() {
@@ -321,6 +339,16 @@ void checkBattery() {
   int raw_adc = analogRead(VOLTAGE_PIN);
   float adc_voltage = (raw_adc / 4095.0) * VREF;
   battery_voltage = adc_voltage * ((R1 + R2) / R2);
+  
+  // ===== HITUNG PERSENTASE BATERAI =====
+  battery_percentage = calculateBatteryPercentage(battery_voltage);
+  
+  // Debug output
+  Serial.print("Battery Voltage: ");
+  Serial.print(battery_voltage);
+  Serial.print("V | Percentage: ");
+  Serial.print(battery_percentage);
+  Serial.println("%");
   
   if (battery_voltage < LOW_BATTERY_THRESHOLD) {
     digitalWrite(LED_BATTERY, HIGH);
@@ -528,6 +556,8 @@ void uploadToThingsBoard() {
     payload += "\"turbidity\":" + String(turbidity, 2) + ",";
     payload += "\"tds\":" + String(tds_value, 2) + ",";
     payload += "\"battery\":" + String(battery_voltage, 2) + ",";
+    // ===== TAMBAHKAN PERSENTASE BATERAI KE PAYLOAD =====
+    payload += "\"battery_percentage\":" + String(battery_percentage) + ",";
     payload += "\"suitable\":";
     payload += is_suitable ? "true" : "false";
     payload += "}";
