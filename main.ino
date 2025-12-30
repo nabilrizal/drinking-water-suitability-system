@@ -7,8 +7,8 @@
 #include <PubSubClient.h>
 
 // WiFi credentials
-const char* ssid = "Kebo";
-const char* password = "741269853";
+const char* ssid = "---";
+const char* password = "12345678";
 
 // ThingsBoard
 const char* mqtt_server = "-";
@@ -21,7 +21,7 @@ PubSubClient client(espClient);
 #define RESET_BUTTON 25
 #define BUZZER 26
 #define LED_BATTERY 14
-#define VOLTAGE_PIN 34  // ADC pin for voltage divider
+#define VOLTAGE_PIN 34
 
 // TFT Display pins (defined in User_Setup.h or here)
 TFT_eSPI tft = TFT_eSPI();
@@ -63,7 +63,19 @@ float prev_temp = 0, prev_pH = 0, prev_turb = 0, prev_tds = 0;
 unsigned long stability_start = 0;
 bool is_stable = false;
 const int STABILITY_TOLERANCE = 5;
-const int STABILITY_DURATION = 5000; // 5 seconds
+const int STABILITY_DURATION = 20000;
+
+// Timing variables for realtime upload
+unsigned long last_upload_time = 0;
+const unsigned long UPLOAD_INTERVAL = 1000;
+
+// State machine
+enum SystemState {
+  STATE_READING,
+  STATE_EVALUATING,
+  STATE_RESULT_DISPLAY
+};
+SystemState current_state = STATE_READING;
 
 void setup() {
   Serial.begin(115200);
@@ -98,52 +110,72 @@ void setup() {
 }
 
 void loop() {
+  // Maintain MQTT connection
+  if (iot_enabled) {
+    if (!client.connected()) {
+      reconnectMQTT();
+    }
+    client.loop();
+  }
+  
   // Read battery voltage
   checkBattery();
   
   // Read all sensors
   readSensors();
   
-  // Display sensor readings
-  displaySensorReadings();
-  
-  // Check for stability
-  if (!is_stable) {
-    if (checkStability()) {
-      is_stable = true;
-      Serial.println("Data stable, evaluating...");
-      delay(500);
-    }
-  } else {
-    // Evaluate water suitability
-    evaluateWater();
-    
-    // Display result
-    displayResult();
-    
-    // Upload to ThingsBoard
-    if (iot_enabled && client.connected()) {
+  // Upload to ThingsBoard every 1 second (realtime)
+  if (iot_enabled && client.connected()) {
+    unsigned long current_time = millis();
+    if (current_time - last_upload_time >= UPLOAD_INTERVAL) {
       uploadToThingsBoard();
+      last_upload_time = current_time;
     }
-    
-    // Play buzzer based on result
-    playBuzzer();
-    
-    // Wait for reset button
-    Serial.println("Waiting for reset button...");
-    while (digitalRead(RESET_BUTTON) == HIGH) {
-      checkBattery();
-      if (iot_enabled) {
-        client.loop();
+  }
+  
+  // State machine handling
+  switch (current_state) {
+    case STATE_READING:
+      // Display sensor readings
+      displaySensorReadings();
+      
+      // Check for stability
+      if (!is_stable) {
+        if (checkStability()) {
+          is_stable = true;
+          Serial.println("Data stable, evaluating...");
+          current_state = STATE_EVALUATING;
+          delay(500);
+        }
       }
-      delay(100);
-    }
-    
-    // Reset pressed
-    Serial.println("Reset button pressed, restarting...");
-    delay(300); // Debounce
-    is_stable = false;
-    tft.fillScreen(TFT_BLACK);
+      break;
+      
+    case STATE_EVALUATING:
+      // Evaluate water suitability
+      evaluateWater();
+      
+      // Display result
+      displayResult();
+      
+      // Play buzzer based on result
+      playBuzzer();
+      
+      // Move to result display state
+      current_state = STATE_RESULT_DISPLAY;
+      Serial.println("Waiting for reset button...");
+      break;
+      
+    case STATE_RESULT_DISPLAY:
+      // Wait for reset button
+      if (digitalRead(RESET_BUTTON) == LOW) {
+        // Reset pressed
+        Serial.println("Reset button pressed, restarting...");
+        delay(300); // Debounce
+        is_stable = false;
+        current_state = STATE_READING;
+        tft.fillScreen(TFT_BLACK);
+      }
+      break;
   }
   
   delay(100);
@@ -204,7 +236,7 @@ void connectWiFi() {
   WiFi.begin(ssid, password);
   
   while (WiFi.status() != WL_CONNECTED && attempts < 3) {
-    delay(1000);
+    delay(3000);
     attempts++;
     Serial.print("Attempt ");
     Serial.print(attempts);
@@ -243,16 +275,8 @@ void checkBattery() {
   float adc_voltage = (raw_adc / 4095.0) * VREF;
   battery_voltage = adc_voltage * ((R1 + R2) / R2);
   
-  Serial.print("Battery Voltage: ");
-  Serial.print(battery_voltage);
-  Serial.println("V");
-  
   if (battery_voltage < LOW_BATTERY_THRESHOLD) {
     digitalWrite(LED_BATTERY, HIGH);
-    tft.setTextSize(1);
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("Low Battery", 120, 230);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
   } else {
     digitalWrite(LED_BATTERY, LOW);
   }
@@ -332,6 +356,14 @@ void displaySensorReadings() {
     tft.setTextSize(1);
     tft.setTextDatum(MC_DATUM);
     tft.drawString("Stabilizing...", 120, 200);
+  }
+  
+  // Display low battery warning if needed
+  if (battery_voltage < LOW_BATTERY_THRESHOLD) {
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("Low Battery", 120, 230);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
   }
 }
 
@@ -444,11 +476,11 @@ void uploadToThingsBoard() {
   
   if (client.connected()) {
     String payload = "{";
-    payload += "\"temperature\":" + String(temperature) + ",";
-    payload += "\"pH\":" + String(pH_value) + ",";
-    payload += "\"turbidity\":" + String(turbidity) + ",";
-    payload += "\"tds\":" + String(tds_value) + ",";
-    payload += "\"battery\":" + String(battery_voltage) + ",";
+    payload += "\"temperature\":" + String(temperature, 2) + ",";
+    payload += "\"pH\":" + String(pH_value, 2) + ",";
+    payload += "\"turbidity\":" + String(turbidity, 2) + ",";
+    payload += "\"tds\":" + String(tds_value, 2) + ",";
+    payload += "\"battery\":" + String(battery_voltage, 2) + ",";
     payload += "\"suitable\":";
     payload += is_suitable ? "true" : "false";
     payload += "}";
